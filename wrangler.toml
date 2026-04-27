@@ -12,12 +12,12 @@ THREAT_SCORE_BLOCK_THRESHOLD = "0.8"
 THREAT_SCORE_CHALLENGE_THRESHOLD = "0.5"
 RATE_LIMIT_WINDOW_SECONDS = "60"
 RATE_LIMIT_MAX_REQUESTS = "100"
-ADMIN_API_KEY = "change-me-before-production"
+# ADMIN_API_KEY — set via: npx wrangler secret put ADMIN_API_KEY
 
 [[kv_namespaces]]
 binding = "WAF_RULES"
-id = "c9d04c1148d246e3a6f1a2038c7fca92"
-preview_id = "e789ec3b178f473db183b466cf931a75"
+id = "YOUR_KV_NAMESPACE_ID"
+preview_id = "YOUR_KV_PREVIEW_ID"
 
 [[durable_objects.bindings]]
 name = "RATE_LIMITER"
