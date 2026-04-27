@@ -1,0 +1,122 @@
+[
+  {
+    "id": "sqli-001",
+    "name": "SQL Injection - Union Select",
+    "phase": "request",
+    "target": ["query", "body", "path"],
+    "pattern": "(union\\s+select|union\\s+all\\s+select)",
+    "score": 70,
+    "action": "block",
+    "tags": ["sqli", "owasp-a03"]
+  },
+  {
+    "id": "sqli-002",
+    "name": "SQL Injection - Boolean Blind",
+    "phase": "request",
+    "target": ["query", "body"],
+    "pattern": "(\\bor\\b\\s+\\d+\\s*=\\s*\\d+|\\band\\b\\s+\\d+\\s*=\\s*\\d+|'\\s*or\\s*'\\d+'='\\d+')",
+    "score": 60,
+    "action": "block",
+    "tags": ["sqli", "owasp-a03"]
+  },
+  {
+    "id": "sqli-003",
+    "name": "SQL Injection - Common Keywords",
+    "phase": "request",
+    "target": ["query", "body"],
+    "pattern": "(drop\\s+table|insert\\s+into|delete\\s+from|update\\s+\\w+\\s+set|exec\\s*\\(|xp_cmdshell)",
+    "score": 80,
+    "action": "block",
+    "tags": ["sqli", "owasp-a03"]
+  },
+  {
+    "id": "xss-001",
+    "name": "XSS - Script Tag",
+    "phase": "request",
+    "target": ["query", "body", "headers"],
+    "pattern": "<script[\\s>]",
+    "score": 65,
+    "action": "block",
+    "tags": ["xss", "owasp-a03"]
+  },
+  {
+    "id": "xss-002",
+    "name": "XSS - Event Handler",
+    "phase": "request",
+    "target": ["query", "body"],
+    "pattern": "on(load|error|click|mouseover|focus|blur|change|submit|keydown|keyup)\\s*=",
+    "score": 55,
+    "action": "block",
+    "tags": ["xss", "owasp-a03"]
+  },
+  {
+    "id": "xss-003",
+    "name": "XSS - Javascript Protocol",
+    "phase": "request",
+    "target": ["query", "body"],
+    "pattern": "javascript\\s*:",
+    "score": 60,
+    "action": "block",
+    "tags": ["xss", "owasp-a03"]
+  },
+  {
+    "id": "traversal-001",
+    "name": "Path Traversal",
+    "phase": "request",
+    "target": ["query", "path"],
+    "pattern": "(\\.\\./|\\.\\.\\\\|%2e%2e%2f|%2e%2e/|\\.%2e/|%2e\\./)",
+    "score": 70,
+    "action": "block",
+    "tags": ["traversal", "owasp-a01"]
+  },
+  {
+    "id": "rfi-001",
+    "name": "Remote File Inclusion",
+    "phase": "request",
+    "target": ["query"],
+    "pattern": "(https?|ftp|php|data):\\/\\/[^\\s]+\\.(php|asp|aspx|jsp|cgi)",
+    "score": 75,
+    "action": "block",
+    "tags": ["rfi", "owasp-a01"]
+  },
+  {
+    "id": "cmd-001",
+    "name": "Command Injection",
+    "phase": "request",
+    "target": ["query", "body"],
+    "pattern": "(;\\s*(ls|cat|wget|curl|nc|bash|sh|python|perl|ruby)\\b|\\|\\s*(ls|cat|wget|curl|nc|bash)\\b|`[^`]+`)",
+    "score": 80,
+    "action": "block",
+    "tags": ["cmdi", "owasp-a03"]
+  },
+  {
+    "id": "scanner-001",
+    "name": "Security Scanner User-Agent",
+    "phase": "request",
+    "target": ["headers"],
+    "pattern": "(nikto|sqlmap|nmap|masscan|zgrab|nuclei|dirbuster|gobuster|wfuzz|burpsuite|acunetix|nessus|openvas)",
+    "score": 50,
+    "action": "log",
+    "tags": ["scanner", "recon"]
+  },
+  {
+    "id": "shell-001",
+    "name": "Web Shell Signature",
+    "phase": "request",
+    "target": ["body"],
+    "pattern": "(eval\\s*\\(base64_decode|passthru\\s*\\(|shell_exec\\s*\\(|system\\s*\\(\\$_|preg_replace\\s*\\(.*\\/e)",
+    "score": 90,
+    "action": "block",
+    "tags": ["webshell", "owasp-a01"]
+  },
+  {
+    "id": "ssrf-001",
+    "name": "SSRF - Internal Addresses",
+    "phase": "request",
+    "target": ["query", "body"],
+    "pattern": "(169\\.254\\.169\\.254|metadata\\.google|localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\]|192\\.168\\.|10\\.\\d+\\.|172\\.(1[6-9]|2\\d|3[01])\\.)",
+    "score": 65,
+    "action": "block",
+    "tags": ["ssrf", "owasp-a10"]
+  }
+]

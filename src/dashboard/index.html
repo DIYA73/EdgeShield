@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EdgeShield — Real-Time Threat Map</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body { background: #0a0e1a; color: #e2e8f0; font-family: 'Inter', monospace; }
+    #map { height: 65vh; filter: brightness(0.85) saturate(0.7); }
+    .pulse { animation: pulse 1.5s ease-out forwards; }
+    @keyframes pulse {
+      0%   { transform: scale(0.4); opacity: 1; }
+      100% { transform: scale(2.5); opacity: 0; }
+    }
+    .stat-card { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); }
+    .attack-badge { font-size: 0.65rem; padding: 2px 6px; border-radius: 9999px; }
+    .feed-item { border-left: 3px solid; animation: fadeIn 0.4s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; } }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+  <!-- Header -->
+  <header class="px-6 py-3 flex items-center justify-between border-b border-white/10">
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 rounded bg-red-600 flex items-center justify-center font-bold text-sm">ES</div>
+      <span class="font-semibold text-lg tracking-tight">EdgeShield</span>
+      <span class="text-xs text-slate-500 font-mono">Distributed WAF</span>
+    </div>
+    <div class="flex items-center gap-2 text-xs">
+      <span id="ws-status" class="w-2 h-2 rounded-full bg-yellow-500"></span>
+      <span id="ws-label" class="text-slate-400">Connecting...</span>
+    </div>
+  </header>
+
+  <!-- Stats bar -->
+  <div class="grid grid-cols-4 gap-3 px-6 py-3 border-b border-white/10">
+    <div class="stat-card rounded p-3">
+      <div class="text-xs text-slate-400 mb-1">Requests / min</div>
+      <div id="stat-rpm" class="text-xl font-bold tabular-nums">0</div>
+    </div>
+    <div class="stat-card rounded p-3">
+      <div class="text-xs text-slate-400 mb-1">Blocked (session)</div>
+      <div id="stat-blocked" class="text-xl font-bold text-red-400 tabular-nums">0</div>
+    </div>
+    <div class="stat-card rounded p-3">
+      <div class="text-xs text-slate-400 mb-1">Challenged</div>
+      <div id="stat-challenged" class="text-xl font-bold text-yellow-400 tabular-nums">0</div>
+    </div>
+    <div class="stat-card rounded p-3">
+      <div class="text-xs text-slate-400 mb-1">Avg Threat Score</div>
+      <div id="stat-avg-score" class="text-xl font-bold tabular-nums">0.00</div>
+    </div>
+  </div>
+
+  <!-- Map + Feed -->
+  <div class="flex flex-1 overflow-hidden">
+    <div id="map" class="flex-1"></div>
+
+    <!-- Live feed -->
+    <div class="w-72 flex flex-col border-l border-white/10 overflow-hidden">
+      <div class="px-4 py-2 text-xs font-semibold text-slate-400 border-b border-white/10 flex items-center justify-between">
+        LIVE FEED
+        <span id="feed-count" class="bg-slate-700 rounded px-1.5 py-0.5 tabular-nums">0</span>
+      </div>
+      <div id="feed" class="flex-1 overflow-y-auto text-xs px-2 py-2 space-y-1.5"></div>
+    </div>
+  </div>
+
+  <script>
+    // ── Map setup ───────────────────────────────────────────────────────────
+    const map = L.map('map', { zoomControl: false, attributionControl: false })
+      .setView([20, 0], 2);
+
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution: '© OpenStreetMap © CARTO',
+    }).addTo(map);
+
+    // ── Stats ────────────────────────────────────────────────────────────────
+    let stats = { rpm: 0, blocked: 0, challenged: 0, scores: [] };
+    let eventCount = 0;
+    let recentRequests = [];
+
+    function updateStats(event) {
+      eventCount++;
+      recentRequests.push(Date.now());
+      recentRequests = recentRequests.filter(t => Date.now() - t < 60000);
+
+      if (event.decision === 'block') stats.blocked++;
+      if (event.decision === 'challenge') stats.challenged++;
+      stats.scores.push(event.score);
+      if (stats.scores.length > 100) stats.scores.shift();
+
+      document.getElementById('stat-rpm').textContent = recentRequests.length;
+      document.getElementById('stat-blocked').textContent = stats.blocked;
+      document.getElementById('stat-challenged').textContent = stats.challenged;
+      const avg = stats.scores.reduce((a, b) => a + b, 0) / stats.scores.length;
+      document.getElementById('stat-avg-score').textContent = avg.toFixed(3);
+      document.getElementById('feed-count').textContent = eventCount;
+    }
+
+    // ── Map markers ─────────────────────────────────────────────────────────
+    const ATTACK_COLORS = {
+      sqli: '#ef4444',
+      xss: '#f97316',
+      traversal: '#a855f7',
+      cmdi: '#ec4899',
+      ssrf: '#06b6d4',
+      scanner: '#facc15',
+      anomaly: '#94a3b8',
+    };
+
+    function addMarker(event) {
+      if (!event.lat || !event.lon) return;
+      const color = ATTACK_COLORS[event.attackType] ?? '#94a3b8';
+      const radius = 6 + event.score * 14;
+
+      const circle = L.circleMarker([event.lat, event.lon], {
+        radius,
+        color,
+        fillColor: color,
+        fillOpacity: 0.7,
+        weight: 1,
+      }).addTo(map);
+
+      circle.bindPopup(`
+        <strong>${event.attackType.toUpperCase()}</strong><br>
+        Score: ${event.score.toFixed(3)}<br>
+        IP: ${event.ip}<br>
+        Country: ${event.country}<br>
+        Decision: ${event.decision}
+      `);
+
+      setTimeout(() => map.removeLayer(circle), 8000);
+    }
+
+    // ── Live feed ────────────────────────────────────────────────────────────
+    function addFeedItem(event) {
+      const color = ATTACK_COLORS[event.attackType] ?? '#94a3b8';
+      const decisionColor = event.decision === 'block' ? '#ef4444'
+        : event.decision === 'challenge' ? '#facc15' : '#94a3b8';
+
+      const el = document.createElement('div');
+      el.className = 'feed-item rounded p-2 bg-white/5';
+      el.style.borderColor = color;
+      el.innerHTML = `
+        <div class="flex justify-between items-center">
+          <span class="attack-badge text-white" style="background:${color}33;color:${color}">${event.attackType}</span>
+          <span class="text-slate-500">${event.country}</span>
+        </div>
+        <div class="mt-1 flex justify-between text-slate-400">
+          <span>Score: <span class="font-bold text-white">${event.score.toFixed(3)}</span></span>
+          <span style="color:${decisionColor}">${event.decision.toUpperCase()}</span>
+        </div>
+      `;
+
+      const feed = document.getElementById('feed');
+      feed.prepend(el);
+      if (feed.children.length > 40) feed.lastChild.remove();
+    }
+
+    // ── WebSocket ────────────────────────────────────────────────────────────
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/ws/threats`);
+      const statusDot = document.getElementById('ws-status');
+      const statusLabel = document.getElementById('ws-label');
+
+      ws.onopen = () => {
+        statusDot.className = 'w-2 h-2 rounded-full bg-green-500';
+        statusLabel.textContent = 'Connected';
+      };
+
+      ws.onmessage = (e) => {
+        const event = JSON.parse(e.data);
+        addMarker(event);
+        addFeedItem(event);
+        updateStats(event);
+      };
+
+      ws.onclose = () => {
+        statusDot.className = 'w-2 h-2 rounded-full bg-red-500';
+        statusLabel.textContent = 'Reconnecting...';
+        setTimeout(connect, 3000);
+      };
+
+      ws.onpong = () => ws.send('ping');
+    }
+
+    connect();
+
+    // ── Simulate events in development ──────────────────────────────────────
+    if (location.hostname === 'localhost') {
+      const SAMPLE_EVENTS = [
+        { ip: '1.2.3.4', country: 'CN', lat: 39.9, lon: 116.4, attackType: 'sqli', score: 0.92, decision: 'block', timestamp: Date.now() },
+        { ip: '5.6.7.8', country: 'RU', lat: 55.7, lon: 37.6, attackType: 'scanner', score: 0.65, decision: 'challenge', timestamp: Date.now() },
+        { ip: '9.10.11.12', country: 'US', lat: 37.8, lon: -122.4, attackType: 'xss', score: 0.78, decision: 'block', timestamp: Date.now() },
+        { ip: '13.14.15.16', country: 'DE', lat: 52.5, lon: 13.4, attackType: 'traversal', score: 0.55, decision: 'log', timestamp: Date.now() },
+      ];
+      setInterval(() => {
+        const event = { ...SAMPLE_EVENTS[Math.floor(Math.random() * SAMPLE_EVENTS.length)], timestamp: Date.now(), requestId: crypto.randomUUID() };
+        addMarker(event);
+        addFeedItem(event);
+        updateStats(event);
+      }, 1500);
+    }
+  </script>
+</body>
+</html>
