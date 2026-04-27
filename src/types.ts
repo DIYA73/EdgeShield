@@ -1,4 +1,5 @@
 export interface Env {
+  ASSETS: Fetcher;
   WAF_RULES: KVNamespace;
   RATE_LIMITER: DurableObjectNamespace;
   THREAT_EVENTS: DurableObjectNamespace;
@@ -6,6 +7,7 @@ export interface Env {
   THREAT_SCORE_CHALLENGE_THRESHOLD: string;
   RATE_LIMIT_WINDOW_SECONDS: string;
   RATE_LIMIT_MAX_REQUESTS: string;
+  ADMIN_API_KEY: string;
 }
 
 export type RuleAction = "block" | "challenge" | "log" | "allow";

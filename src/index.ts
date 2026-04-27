@@ -2,9 +2,11 @@ import { Hono } from "hono";
 import type { Env, ThreatContext } from "./types.js";
 import { RulesEngine } from "./rules/engine.js";
 import { analyzeBotSignals, botScore } from "./fingerprint/bot.js";
+import { getIpReputation } from "./fingerprint/reputation.js";
 import { checkRateLimit } from "./ratelimit/limiter.js";
-import { mlScore } from "./ml/scorer.js";
+import { mlScore, loadWeights } from "./ml/scorer.js";
 import { buildThreatEvent, publishThreatEvent } from "./pipeline/threat.js";
+import { adminRoutes } from "./admin/routes.js";
 import owaspRules from "../rules/owasp-core.json" assert { type: "json" };
 
 export { RateLimiter } from "./ratelimit/limiter.js";
@@ -14,32 +16,34 @@ const app = new Hono<{ Bindings: Env }>();
 const engine = new RulesEngine();
 engine.load(owaspRules as any);
 
-// ── Health check ─────────────────────────────────────────────────────────────
-app.get("/health", (c) => c.json({ status: "ok", version: "1.0.0" }));
+// ── Health check ──────────────────────────────────────────────────────────────
+app.get("/health", (c) => c.json({ status: "ok", version: "1.1.0" }));
 
-// ── Threat map WebSocket subscription ────────────────────────────────────────
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+app.get("/dashboard", async (c) => {
+  const asset = await c.env.ASSETS.fetch(new Request("http://assets/dashboard.html"));
+  return new Response(asset.body, {
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+  });
+});
+
+// ── Threat map WebSocket ───────────────────────────────────────────────────────
 app.get("/ws/threats", async (c) => {
-  const upgradeHeader = c.req.header("Upgrade");
-  if (upgradeHeader !== "websocket") {
+  if (c.req.header("Upgrade") !== "websocket") {
     return c.text("Expected WebSocket upgrade", 426);
   }
   const id = c.env.THREAT_EVENTS.idFromName("global");
   const stub = c.env.THREAT_EVENTS.get(id);
-  return stub.fetch(c.req.raw);
+  return stub.fetch(new Request("http://internal/subscribe", c.req.raw));
 });
 
-// ── Admin: reload rules from KV ───────────────────────────────────────────────
-app.post("/admin/rules/reload", async (c) => {
-  const rulesJson = await c.env.WAF_RULES.get("owasp-core");
-  if (rulesJson) {
-    engine.load(JSON.parse(rulesJson));
-    return c.json({ reloaded: true });
-  }
-  return c.json({ reloaded: false, reason: "No rules in KV" }, 404);
-});
+// ── Admin API (key-protected) ─────────────────────────────────────────────────
+app.route("/admin", adminRoutes);
 
-// ── WAF middleware (runs on every proxied request) ────────────────────────────
+// ── WAF middleware (runs on every request) ────────────────────────────────────
 app.use("/*", async (c, next) => {
+  // Load model weights from KV on first warm request (cached per isolate)
+  await loadWeights(c.env.WAF_RULES);
   const req = c.req.raw;
   const cf = (req as any).cf as IncomingRequestCfProperties | undefined;
   const url = new URL(req.url);
@@ -48,50 +52,61 @@ app.use("/*", async (c, next) => {
   const country = cf?.country ?? c.req.header("cf-ipcountry") ?? "XX";
   const requestId = crypto.randomUUID();
 
-  // 1. Rate limit check
+  // 1. IP reputation (runs in parallel with other checks)
+  const [ipRep, ruleMatches] = await Promise.all([
+    getIpReputation(ip, cf, c.env.WAF_RULES),
+    engine.evaluate(req),
+  ]);
+
+  // Hard-block explicitly blocklisted IPs before doing any further work
+  if (ipRep.isBlocklisted) {
+    return c.json({ error: "Forbidden", requestId, reason: "IP blocklisted" }, 403);
+  }
+
+  // 2. Bot fingerprinting
+  const botSignals = analyzeBotSignals(req, cf);
+  const botThreatScore = botScore(botSignals);
+
+  // 3. ML scoring (MLP with 12 features)
+  const score = mlScore(
+    botSignals,
+    ruleMatches,
+    url,
+    ipRep.score,
+    ipRep.cfThreatScore,
+    req.method
+  );
+
+  // 4. Rate limit — adaptive: high-threat IPs get tighter windows
   const rl = await checkRateLimit(
     c.env.RATE_LIMITER,
     ip,
     url.pathname,
     parseInt(c.env.RATE_LIMIT_MAX_REQUESTS, 10),
-    parseInt(c.env.RATE_LIMIT_WINDOW_SECONDS, 10)
+    parseInt(c.env.RATE_LIMIT_WINDOW_SECONDS, 10),
+    score
   );
 
   if (!rl.allowed) {
     c.header("Retry-After", String(rl.retryAfter ?? 60));
     c.header("X-RateLimit-Remaining", "0");
-    c.header("X-RateLimit-Reset", String(Math.floor(rl.resetAt / 1000)));
     return c.text("Too Many Requests", 429);
   }
 
   c.header("X-RateLimit-Remaining", String(rl.remaining));
 
-  // 2. WAF rules evaluation
-  const ruleMatches = await engine.evaluate(req);
+  // 5. Resolve decision
   const { action: ruleAction, totalScore: ruleScore } = engine.resolveAction(ruleMatches);
-
-  // 3. Bot fingerprinting
-  const botSignals = analyzeBotSignals(req, cf);
-  const botThreatScore = botScore(botSignals);
-
-  // 4. ML scoring
-  const score = mlScore(botSignals, ruleMatches, url);
-
   const blockThreshold = parseFloat(c.env.THREAT_SCORE_BLOCK_THRESHOLD);
   const challengeThreshold = parseFloat(c.env.THREAT_SCORE_CHALLENGE_THRESHOLD);
 
   let decision: ThreatContext["decision"] = "allow";
-  if (ruleAction === "block" || score >= blockThreshold) {
-    decision = "block";
-  } else if (ruleAction === "challenge" || score >= challengeThreshold) {
-    decision = "challenge";
-  } else if (ruleAction === "log") {
-    decision = "log";
-  }
+  if (ruleAction === "block" || score >= blockThreshold) decision = "block";
+  else if (ruleAction === "challenge" || score >= challengeThreshold) decision = "challenge";
+  else if (ruleAction === "log") decision = "log";
 
   const ctx: ThreatContext = {
-    ip,
-    country,
+    ip, country,
     userAgent: c.req.header("user-agent") ?? "",
     path: url.pathname,
     method: req.method,
@@ -104,13 +119,17 @@ app.use("/*", async (c, next) => {
     requestId,
   };
 
-  // 5. Publish threat events for non-clean requests (fire-and-forget)
+  // 6. Publish to threat bus + increment stats (fire-and-forget)
   if (decision !== "allow" || ruleMatches.length > 0 || botThreatScore > 0.6) {
     const event = buildThreatEvent(ctx, cf);
-    publishThreatEvent(c.env.THREAT_EVENTS, event).catch(() => {});
+    Promise.all([
+      publishThreatEvent(c.env.THREAT_EVENTS, event),
+      incrementStat(c.env.WAF_RULES, decision),
+    ]).catch(() => {});
   }
+  incrementStat(c.env.WAF_RULES, "total").catch(() => {});
 
-  // 6. Enforce decision
+  // 7. Enforce decision
   c.header("X-EdgeShield-Score", score.toFixed(3));
   c.header("X-EdgeShield-Decision", decision);
   c.header("X-Request-Id", requestId);
@@ -121,16 +140,24 @@ app.use("/*", async (c, next) => {
       403
     );
   }
-
   if (decision === "challenge") {
-    // In production, redirect to a CAPTCHA or JS challenge page
     return c.json({ error: "Challenge required", requestId }, 403);
   }
 
   await next();
 });
 
-// ── Catch-all proxy ───────────────────────────────────────────────────────────
+// ── Catch-all proxy placeholder ────────────────────────────────────────────────
 app.all("/*", (c) => c.text("EdgeShield: request passed", 200));
+
+async function incrementStat(kv: KVNamespace, key: string): Promise<void> {
+  const statKey = key === "total" ? "stats:total"
+    : key === "block" ? "stats:blocked"
+    : key === "challenge" ? "stats:challenged"
+    : null;
+  if (!statKey) return;
+  const current = parseInt((await kv.get(statKey)) ?? "0", 10);
+  await kv.put(statKey, String(current + 1));
+}
 
 export default app;

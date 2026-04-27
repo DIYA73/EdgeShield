@@ -3,16 +3,21 @@ main = "src/index.ts"
 compatibility_date = "2024-09-25"
 compatibility_flags = ["nodejs_compat"]
 
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
 [vars]
 THREAT_SCORE_BLOCK_THRESHOLD = "0.8"
 THREAT_SCORE_CHALLENGE_THRESHOLD = "0.5"
 RATE_LIMIT_WINDOW_SECONDS = "60"
 RATE_LIMIT_MAX_REQUESTS = "100"
+ADMIN_API_KEY = "change-me-before-production"
 
 [[kv_namespaces]]
 binding = "WAF_RULES"
-id = "YOUR_KV_NAMESPACE_ID"
-preview_id = "YOUR_KV_PREVIEW_ID"
+id = "c9d04c1148d246e3a6f1a2038c7fca92"
+preview_id = "e789ec3b178f473db183b466cf931a75"
 
 [[durable_objects.bindings]]
 name = "RATE_LIMITER"
@@ -24,4 +29,4 @@ class_name = "ThreatEventBus"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["RateLimiter", "ThreatEventBus"]
+new_sqlite_classes = ["RateLimiter", "ThreatEventBus"]
